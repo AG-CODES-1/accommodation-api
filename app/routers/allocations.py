@@ -5,8 +5,10 @@ Presentation layer — HTTP endpoint for triggering the room allocation algorith
 
 Routes
 ------
-  POST /allocations/    Run the matchmaker for a given student_id and
-                        return the resulting Allocation record.
+  POST   /allocations/              Run the matchmaker for a given student_id and
+                                    return the resulting Allocation record.
+  DELETE /allocations/{allocation_id}  Cancel an allocation and trigger automatic
+                                    waitlist promotion.
 
 Design note
 -----------
@@ -21,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.algorithms.matchmaker import allocate_room
+from app.algorithms.matchmaker import allocate_room, cancel_allocation
 from app.database import get_db
 from app.schemas import AllocationResponse
 
@@ -111,3 +113,56 @@ def trigger_allocation(
         ) from exc
 
     return allocation
+
+
+# ---------------------------------------------------------------------------
+# DELETE /allocations/{allocation_id} — Cancel + promote from waitlist
+# ---------------------------------------------------------------------------
+
+@router.delete(
+    "/{allocation_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Cancel an allocation",
+    description=(
+        "Cancels the specified Allocation record and frees the associated room bed. "
+        "Immediately attempts to promote the oldest eligible WAITLISTED student "
+        "into the vacated room. Returns a summary of the cancellation and any "
+        "promotion that occurred."
+    ),
+)
+def cancel(
+    allocation_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Invoke ``cancel_allocation`` and surface domain errors as HTTP responses.
+
+    Args:
+        allocation_id: Path parameter — primary key of the Allocation to cancel.
+        db:            Injected database session (one per request).
+
+    Returns:
+        A JSON object summarising the cancellation and any waitlist promotion.
+
+    Raises:
+        HTTPException 404: Allocation not found.
+        HTTPException 400: Allocation is already CANCELLED.
+        HTTPException 500: Unexpected server-side error.
+    """
+    try:
+        result = cancel_allocation(db=db, allocation_id=allocation_id)
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "An unexpected error occurred while cancelling the allocation. "
+                f"Details: {exc}"
+            ),
+        ) from exc
+
+    return result

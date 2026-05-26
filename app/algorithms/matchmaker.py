@@ -8,20 +8,13 @@ applicant to a suitable Room.  It has no knowledge of HTTP routing;
 it operates only on domain objects and raises domain-appropriate
 exceptions that the router layer translates into HTTP responses.
 
-Algorithm summary
------------------
-1. Fetch the student — raise 404 if not found.
-2. Build gender-compatibility filter rules.
-3. Query rooms that satisfy capacity, budget, and gender constraints.
-4. Lock the selected row with FOR UPDATE to prevent double-allocation
-   under concurrent requests.
-5. If a room is found:
-   a. Create an Allocation record and increment the room's occupant count.
-   b. Commit atomically and return the Allocation.
-6. If no room is found (all full, over budget, or incompatible gender):
-   a. Create a WAITLISTED Allocation with room_id=None.
-   b. Commit and return the waitlisted record so the caller can inform
-      the student they are in the queue.
+Functions
+---------
+allocate_room       — Match a student to the best available room.
+                      Falls back to WAITLISTED status if no room fits.
+cancel_allocation   — Cancel an existing allocation, free the room,
+                      and automatically promote the oldest eligible
+                      waitlisted student into the vacated bed.
 """
 
 from datetime import datetime, timezone
@@ -205,3 +198,165 @@ def allocate_room(db: Session, student_id: int) -> Allocation:
     db.refresh(new_allocation)
 
     return new_allocation
+
+
+# ---------------------------------------------------------------------------
+# Room-to-student gender eligibility helper
+# ---------------------------------------------------------------------------
+
+# Maps a room's gender restriction to the set of student genders that are
+# allowed to occupy it.  Used during waitlist promotion to find compatible
+# waiting students for the newly freed room.
+_ROOM_RESTRICTION_TO_ELIGIBLE_GENDERS: dict[GenderRestrictionEnum, list[GenderEnum]] = {
+    GenderRestrictionEnum.MIXED:       [GenderEnum.MALE, GenderEnum.FEMALE, GenderEnum.OTHER],
+    GenderRestrictionEnum.MALE_ONLY:   [GenderEnum.MALE],
+    GenderRestrictionEnum.FEMALE_ONLY: [GenderEnum.FEMALE],
+}
+
+
+# ---------------------------------------------------------------------------
+# Cancellation + waitlist promotion function
+# ---------------------------------------------------------------------------
+
+def cancel_allocation(db: Session, allocation_id: int) -> dict:
+    """
+    Cancel an existing Allocation and automatically promote the oldest
+    eligible waitlisted student into the vacated room (if one exists).
+
+    State machine transitions
+    -------------------------
+    Cancelled allocation:    PENDING / CONFIRMED  →  CANCELLED
+    Promoted allocation:     WAITLISTED           →  PENDING
+
+    Locking strategy
+    ----------------
+    Both the target Allocation row and (when applicable) the Room row
+    are locked with ``SELECT … FOR UPDATE`` before mutation.  The
+    waitlisted Allocation selected for promotion is locked the same way.
+    All three locks are held within a single transaction, so no other
+    concurrent request can observe an inconsistent intermediate state.
+
+    Args:
+        db:            An active SQLAlchemy ``Session``.
+        allocation_id: Primary key of the Allocation to cancel.
+
+    Returns:
+        A dictionary containing:
+        - ``cancelled_allocation_id``  — id of the cancelled record.
+        - ``freed_room_id``            — id of the room that was freed
+                                         (None for waitlisted cancellations).
+        - ``promoted_allocation_id``   — id of the promoted waitlisted
+                                         record, or None if no match found.
+        - ``promoted_student_id``      — student_id of the promoted
+                                         record, or None.
+        - ``message``                  — human-readable summary.
+
+    Raises:
+        HTTPException 404: Allocation with ``allocation_id`` does not exist.
+        HTTPException 400: Allocation is already CANCELLED.
+    """
+
+    # ------------------------------------------------------------------
+    # Step 1 — Fetch and lock the target allocation
+    # ------------------------------------------------------------------
+    allocation: Allocation | None = (
+        db.query(Allocation)
+        .filter(Allocation.id == allocation_id)
+        .with_for_update()
+        .first()
+    )
+
+    if allocation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Allocation with id={allocation_id} was not found.",
+        )
+
+    if allocation.status == AllocationStatusEnum.CANCELLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Allocation id={allocation_id} is already CANCELLED.",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2 — Cancel the allocation
+    # ------------------------------------------------------------------
+    allocation.status = AllocationStatusEnum.CANCELLED
+    freed_room: Room | None = None
+
+    # ------------------------------------------------------------------
+    # Step 3 — Free the room (if any was assigned)
+    # ------------------------------------------------------------------
+    if allocation.room_id is not None:
+        freed_room = (
+            db.query(Room)
+            .filter(Room.id == allocation.room_id)
+            .with_for_update()
+            .first()
+        )
+        if freed_room is not None:
+            freed_room.current_occupants = max(0, freed_room.current_occupants - 1)
+
+    # ------------------------------------------------------------------
+    # Step 4 — Waitlist promotion
+    # ------------------------------------------------------------------
+    # Only attempt promotion when a real room was freed.
+    promoted_allocation: Allocation | None = None
+
+    if freed_room is not None:
+        eligible_genders = _ROOM_RESTRICTION_TO_ELIGIBLE_GENDERS[freed_room.gender_restriction]
+
+        # Find the oldest WAITLISTED allocation whose student can afford
+        # the freed room and whose gender is compatible with its restriction.
+        promoted_allocation = (
+            db.query(Allocation)
+            .join(Student, Allocation.student_id == Student.id)
+            .filter(
+                and_(
+                    Allocation.status == AllocationStatusEnum.WAITLISTED,
+                    Student.max_budget >= freed_room.price,
+                    Student.gender.in_(eligible_genders),
+                )
+            )
+            .order_by(Allocation.timestamp.asc())   # Oldest first — FIFO fairness.
+            .with_for_update()
+            .first()
+        )
+
+        if promoted_allocation is not None:
+            promoted_allocation.room_id = freed_room.id
+            promoted_allocation.status  = AllocationStatusEnum.PENDING
+            freed_room.current_occupants += 1        # Re-occupy the bed.
+
+    # ------------------------------------------------------------------
+    # Step 5 — Commit atomically
+    # ------------------------------------------------------------------
+    db.commit()
+
+    # ------------------------------------------------------------------
+    # Step 6 — Build and return the result summary
+    # ------------------------------------------------------------------
+    if promoted_allocation is not None:
+        message = (
+            f"Allocation {allocation_id} cancelled. "
+            f"Student {promoted_allocation.student_id} promoted from waitlist "
+            f"into room {freed_room.id}."
+        )
+    elif freed_room is not None:
+        message = (
+            f"Allocation {allocation_id} cancelled and room {freed_room.id} freed. "
+            "No eligible waitlisted student found for promotion."
+        )
+    else:
+        message = (
+            f"Waitlisted allocation {allocation_id} cancelled. "
+            "No room was freed (allocation had no assigned room)."
+        )
+
+    return {
+        "cancelled_allocation_id": allocation_id,
+        "freed_room_id":           freed_room.id if freed_room else None,
+        "promoted_allocation_id":  promoted_allocation.id if promoted_allocation else None,
+        "promoted_student_id":     promoted_allocation.student_id if promoted_allocation else None,
+        "message":                 message,
+    }
