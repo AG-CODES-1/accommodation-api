@@ -208,10 +208,13 @@ class AllocationBase(BaseModel):
         description="Primary key of the Student being allocated.",
         examples=[1],
     )
-    room_id: int = Field(
-        ...,
+    room_id: Optional[int] = Field(
+        default=None,
         gt=0,
-        description="Primary key of the Room being assigned.",
+        description=(
+            "Primary key of the Room being assigned. "
+            "Null for WAITLISTED allocations where no room has been assigned yet."
+        ),
         examples=[3],
     )
 

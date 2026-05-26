@@ -282,10 +282,10 @@ class Allocation(Base):
     )
     room_id = Column(
         Integer,
-        ForeignKey("rooms.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("rooms.id", ondelete="SET NULL"),
+        nullable=True,   # NULL when the allocation is WAITLISTED (no room assigned yet).
         index=True,
-        comment="Reference to the allocated Room.",
+        comment="Reference to the allocated Room. NULL for WAITLISTED records.",
     )
 
     # ------------------------------------------------------------------

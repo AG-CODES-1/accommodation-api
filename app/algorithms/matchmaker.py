@@ -15,8 +15,13 @@ Algorithm summary
 3. Query rooms that satisfy capacity, budget, and gender constraints.
 4. Lock the selected row with FOR UPDATE to prevent double-allocation
    under concurrent requests.
-5. Create an Allocation record and increment the room's occupant count.
-6. Commit atomically and return the new Allocation.
+5. If a room is found:
+   a. Create an Allocation record and increment the room's occupant count.
+   b. Commit atomically and return the Allocation.
+6. If no room is found (all full, over budget, or incompatible gender):
+   a. Create a WAITLISTED Allocation with room_id=None.
+   b. Commit and return the waitlisted record so the caller can inform
+      the student they are in the queue.
 """
 
 from datetime import datetime, timezone
@@ -108,8 +113,9 @@ def allocate_room(db: Session, student_id: int) -> Allocation:
 
     Raises:
         HTTPException 404: Student with ``student_id`` does not exist.
-        HTTPException 400: No room satisfies all three constraints
-                           (availability, budget, gender compatibility).
+
+    Returns ``status=WAITLISTED`` (instead of raising) when no room
+    satisfies all three constraints simultaneously.
     """
 
     # ------------------------------------------------------------------
@@ -153,14 +159,23 @@ def allocate_room(db: Session, student_id: int) -> Allocation:
     )
 
     if room is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "No suitable rooms are available for this student. "
-                "All rooms matching the budget and gender criteria are either "
-                "fully occupied or do not exist."
-            ),
+        # ------------------------------------------------------------------
+        # Waitlist fallback — no suitable room is currently available.
+        # ------------------------------------------------------------------
+        # Rather than rejecting the student, we record their intent with
+        # room_id=None and status=WAITLISTED.  A future background job or
+        # manual admin action can re-run the matcher and promote them when
+        # a room opens up.
+        waitlisted_allocation = Allocation(
+            student_id=student.id,
+            room_id=None,
+            timestamp=datetime.now(timezone.utc),
+            status=AllocationStatusEnum.WAITLISTED,
         )
+        db.add(waitlisted_allocation)
+        db.commit()
+        db.refresh(waitlisted_allocation)
+        return waitlisted_allocation
 
     # ------------------------------------------------------------------
     # Step 5a — Create the Allocation record
