@@ -12,11 +12,12 @@ Registered domain routers:
   - /students     →  app.routers.students
   - /rooms        →  app.routers.rooms
   - /allocations  →  app.routers.allocations
+  - /admin        →  app.routers.admin  (login + JWT issuance)
 """
 
 from fastapi import FastAPI
 
-from app.routers import allocations, rooms, students
+from app.routers import admin, allocations, rooms, students
 
 from app.database import engine
 from app.models import Base  # Importing Base after all model classes ensures
@@ -83,3 +84,4 @@ def health_check() -> dict:
 app.include_router(students.router)
 app.include_router(rooms.router)
 app.include_router(allocations.router)
+app.include_router(admin.router)

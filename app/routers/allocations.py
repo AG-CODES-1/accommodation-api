@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.algorithms.matchmaker import allocate_room, cancel_allocation
+from app.auth import get_current_admin
 from app.database import get_db
 from app.schemas import AllocationResponse
 
@@ -65,8 +66,10 @@ class AllocationRequest(BaseModel):
         "to find the best room, then creates an ``Allocation`` record with "
         "status ``PENDING``. "
         "The selected room row is locked with ``SELECT … FOR UPDATE`` to "
-        "prevent race conditions under concurrent requests."
+        "prevent race conditions under concurrent requests. "
+        "**Requires admin Bearer token.**"
     ),
+    dependencies=[Depends(get_current_admin)],
 )
 def trigger_allocation(
     payload: AllocationRequest,
@@ -127,8 +130,10 @@ def trigger_allocation(
         "Cancels the specified Allocation record and frees the associated room bed. "
         "Immediately attempts to promote the oldest eligible WAITLISTED student "
         "into the vacated room. Returns a summary of the cancellation and any "
-        "promotion that occurred."
+        "promotion that occurred. "
+        "**Requires admin Bearer token.**"
     ),
+    dependencies=[Depends(get_current_admin)],
 )
 def cancel(
     allocation_id: int,
