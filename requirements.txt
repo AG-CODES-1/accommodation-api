@@ -1,0 +1,14 @@
+# ── Core API framework ──────────────────────────────────────────────────────
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+
+# ── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.41
+
+# ── Authentication ────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.5.0
+python-multipart==0.0.20     # Required by FastAPI for OAuth2 form parsing.
+
+# ── Testing (used in CI; safe to include in the image for a portfolio project) ─
+pytest==9.0.3
+httpx==0.28.1

@@ -1,0 +1,28 @@
+# Python bytecode & caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Local database (never ship data into the image)
+*.db
+*.sqlite3
+
+# Version control
+.git/
+.github/
+
+# Development / documentation artefacts
+README.md
+.dockerignore
+Dockerfile
+
+# OS noise
+.DS_Store
+Thumbs.db
